@@ -36,7 +36,7 @@ from datetime import datetime
 import os
 import argparse
 import signal
-
+import tensorflow as tf
 
 class GracefulKiller:
     """ Gracefully exit program on CTRL-C """
@@ -141,6 +141,8 @@ def run_policy(env, policy, scaler, logger, episodes):
         trajectories.append(trajectory)
     unscaled = np.concatenate([t['unscaled_obs'] for t in trajectories])
     scaler.update(unscaled)  # update running statistics for scaling observations
+    # logger.log({'_MeanReward': np.mean([t['rewards'].sum() for t in trajectories]),
+    #             'Steps': total_steps})
     logger.log({'_MeanReward': np.mean([t['rewards'].sum() for t in trajectories]),
                 'Steps': total_steps})
 
@@ -287,6 +289,11 @@ def main(env_name, num_episodes, gamma, lam, kl_targ, batch_size, hid1_mult, pol
     run_policy(env, policy, scaler, logger, episodes=5)
     episode = 0
     while episode < num_episodes:
+        # save model
+        if episode % 200 == 0:
+          save_path = policy.saver.save(policy.sess, "/home/csc63182/testspace/models/halfcheetah-trpo/model-%d.ckpt" % (episode))
+          print("Model saved in path: %s" % save_path)
+
         trajectories = run_policy(env, policy, scaler, logger, episodes=batch_size)
         episode += len(trajectories)
         add_value(trajectories, val_func)  # add estimated values to episodes
@@ -314,7 +321,7 @@ if __name__ == "__main__":
     parser.add_argument('env_name', type=str, help='OpenAI Gym environment name')
     parser.add_argument('-n', '--num_episodes', type=int, help='Number of episodes to run',
                         default=1000)
-    parser.add_argument('-g', '--gamma', type=float, help='Discount factor', default=0.995)
+    parser.add_argument('-g', '--gamma', type=float, help='Discount factor', default=0.995) # 0.995
     parser.add_argument('-l', '--lam', type=float, help='Lambda for Generalized Advantage Estimation',
                         default=0.98)
     parser.add_argument('-k', '--kl_targ', type=float, help='D_KL target value',
