@@ -69,7 +69,7 @@ def init_gym(env_name):
     return env, obs_dim, act_dim
 
 
-def run_episode(env, policy, scaler, animate=False):
+def run_episode(env, policy, scaler, animate=False, fix_drct_prob=0):
     """ Run single episode with option to animate
 
     Args:
@@ -92,6 +92,7 @@ def run_episode(env, policy, scaler, animate=False):
     scale, offset = scaler.get()
     scale[-1] = 1.0  # don't scale time step feature
     offset[-1] = 0.0  # don't offset time step feature
+    action = None
     while not done:
         if animate:
             env.render()
@@ -100,7 +101,10 @@ def run_episode(env, policy, scaler, animate=False):
         unscaled_obs.append(obs)
         obs = (obs - offset) * scale  # center and scale observations
         observes.append(obs)
-        action = policy.sample(obs).reshape((1, -1)).astype(np.float32)
+        if np.random.rand() < fix_drct_prob and action is not None:  # use previous action
+          pass  # No need to add?
+        else:
+          action = policy.sample(obs).reshape((1, -1)).astype(np.float32)
         actions.append(action)
         obs, reward, done, _ = env.step(np.squeeze(action, axis=0))
         if not isinstance(reward, float):
@@ -112,7 +116,7 @@ def run_episode(env, policy, scaler, animate=False):
             np.array(rewards, dtype=np.float64), np.concatenate(unscaled_obs))
 
 
-def run_policy(env, policy, scaler, logger, episodes):
+def run_policy(env, policy, scaler, logger, episodes, fix_drct_prob):
     """ Run policy and collect data for a minimum of min_steps and min_episodes
 
     Args:
@@ -132,7 +136,7 @@ def run_policy(env, policy, scaler, logger, episodes):
     total_steps = 0
     trajectories = []
     for e in range(episodes):
-        observes, actions, rewards, unscaled_obs = run_episode(env, policy, scaler)
+        observes, actions, rewards, unscaled_obs = run_episode(env, policy, scaler, fix_drct_prob=fix_drct_prob)
         total_steps += observes.shape[0]
         trajectory = {'observes': observes,
                       'actions': actions,
@@ -286,15 +290,17 @@ def main(env_name, num_episodes, gamma, lam, kl_targ, batch_size, hid1_mult, pol
     val_func = NNValueFunction(obs_dim, hid1_mult)
     policy = Policy(obs_dim, act_dim, kl_targ, hid1_mult, policy_logvar)
     # run a few episodes of untrained policy to initialize scaler:
-    run_policy(env, policy, scaler, logger, episodes=5)
+    run_policy(env, policy, scaler, logger, episodes=5, fix_drct_prob=0)
     episode = 0
+    fix_drct_prob_range = (0.5, 0)
     while episode < num_episodes:
         # save model
         if episode % 200 == 0:
           save_path = policy.saver.save(policy.sess, "/home/csc63182/testspace/models/halfcheetah-trpo/model-%d.ckpt" % (episode))
           print("Model saved in path: %s" % save_path)
 
-        trajectories = run_policy(env, policy, scaler, logger, episodes=batch_size)
+        fix_drct_prob = ((episode * fix_drct_prob_range[1]) + (num_episodes - episode) * fix_drct_prob_range[0]) / num_episodes
+        trajectories = run_policy(env, policy, scaler, logger, episodes=batch_size, fix_drct_prob=fix_drct_prob)
         episode += len(trajectories)
         add_value(trajectories, val_func)  # add estimated values to episodes
         add_disc_sum_rew(trajectories, gamma)  # calculated discounted sum of Rs
