@@ -37,6 +37,7 @@ import os
 import argparse
 import signal
 import tensorflow as tf
+import scipy
 
 class GracefulKiller:
     """ Gracefully exit program on CTRL-C """
@@ -93,6 +94,7 @@ def run_episode(env, policy, scaler, animate=False, fix_drct_prob=0):
     scale[-1] = 1.0  # don't scale time step feature
     offset[-1] = 0.0  # don't offset time step feature
     action = None
+    prev_obs = None
     while not done:
         if animate:
             env.render()
@@ -101,10 +103,15 @@ def run_episode(env, policy, scaler, animate=False, fix_drct_prob=0):
         unscaled_obs.append(obs)
         obs = (obs - offset) * scale  # center and scale observations
         observes.append(obs)
-        if np.random.rand() < fix_drct_prob and action is not None:  # use previous action
+        if prev_obs is not None:
+          dist = scipy.spatial.distance.cosine(obs, prev_obs)
+        else:
+          dist = None
+        if dist is not None and dist < fix_drct_prob:  # use previous action
           pass  # No need to add?
         else:
           action = policy.sample(obs).reshape((1, -1)).astype(np.float32)
+        prev_obs = obs
         actions.append(action)
         obs, reward, done, _ = env.step(np.squeeze(action, axis=0))
         if not isinstance(reward, float):
