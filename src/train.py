@@ -38,6 +38,8 @@ import argparse
 import signal
 import tensorflow as tf
 import scipy
+from collections import deque
+from random import sample
 
 class GracefulKiller:
     """ Gracefully exit program on CTRL-C """
@@ -103,11 +105,11 @@ def run_episode(env, policy, scaler, animate=False, fix_drct_dist=0):
         obs = (obs - offset) * scale  # center and scale observations
         observes.append(obs)
         if len(observes) > 10:
-          center_of_mass_of_obs = np.array(observes[-11, -1]).mean(axis=0)  # calculate using the last 10 obs
+          center_of_mass_of_obs = np.array(observes[-11:-1]).mean(axis=0)  # calculate using the last 10 obs
           dist = scipy.spatial.distance.cosine(obs, center_of_mass_of_obs)
         else:
           dist = None
-        if dist is not None and dist < fix_drct_dist and explore:  # use previous action
+        if dist is not None and dist < fix_drct_dist:  # use previous action
           pass
         else:
           action = policy.sample(obs).reshape((1, -1)).astype(np.float32)
@@ -285,6 +287,8 @@ def main(env_name, num_episodes, gamma, lam, kl_targ, batch_size, hid1_mult, pol
         hid1_mult: hid1 size for policy and value_f (mutliplier of obs dimension)
         policy_logvar: natural log of initial policy variance
     """
+    memory = deque([])
+    memory_size = 80
     killer = GracefulKiller()
     env, obs_dim, act_dim = init_gym(env_name)
     obs_dim += 1  # add 1 to obs dimension for time step feature (see run_episode())
@@ -300,18 +304,37 @@ def main(env_name, num_episodes, gamma, lam, kl_targ, batch_size, hid1_mult, pol
     run_policy(env, target_policy, scaler, logger, episodes=5, fix_drct_dist=0)
     run_policy(env, explore_policy, scaler, logger, episodes=5, fix_drct_dist=0)
     episode = 0
-    #
-    fix_drct_dist_range = (0.6, 0)
+    fix_drct_dist_range = (0.3, 0)
     while episode < num_episodes:
         # save model
         if episode % 200 == 0:
-          save_path = policy.saver.save(policy.sess, "/home/csc63182/testspace/models/halfcheetah-trpo/model-%d.ckpt" % (episode))
+          save_path = target_policy.saver.save(target_policy.sess, "/home/csc63182/testspace/models/halfcheetah-trpo/model-%d.ckpt" % (episode))
 
-        fix_drct_dist = ((episode * fix_drct_dist_range[1]) + (num_episodes - episode) * fix_drct_dist_range[0]) / num_episoes
+        # run a few episodes
+        fix_drct_dist = ((episode * fix_drct_dist_range[1]) + (num_episodes - episode) * fix_drct_dist_range[0]) / num_episodes
         target_trajectories = run_policy(env, target_policy, scaler, logger, episodes=batch_size, fix_drct_dist=0)
         explore_trajectories = run_policy(env, explore_policy, scaler, logger, episodes=batch_size, fix_drct_dist=fix_drct_dist)
-        trajectories = target_trajectories + explore_trajectories
-        episode += len(trajectories / 2)
+
+        # Add to memory
+        n_explore = max(0, int(batch_size*(1 - episode / num_episodes)) - 1)
+        trajectories = target_trajectories + explore_trajectories[:n_explore]
+        episode += batch_size
+        memory += trajectories
+        while len(memory) > memory_size:
+          memory.popleft()
+
+        # train explore network
+        add_value(explore_trajectories, val_func)  # add estimated values to episodes
+        add_disc_sum_rew(explore_trajectories, gamma)  # calculated discounted sum of Rs
+        add_gae(explore_trajectories, gamma, lam)  # calculate advantage
+        observes, actions, advantages, disc_sum_rew = build_train_set(explore_trajectories)
+        explore_policy.update(observes, actions, advantages, logger)  # update policy
+        val_func.fit(observes, disc_sum_rew, logger)  # update value function
+
+
+        # train target network
+        # re-sample trajectories
+        trajectories = sample(memory, batch_size)
         add_value(trajectories, val_func)  # add estimated values to episodes
         add_disc_sum_rew(trajectories, gamma)  # calculated discounted sum of Rs
         add_gae(trajectories, gamma, lam)  # calculate advantage
@@ -319,7 +342,7 @@ def main(env_name, num_episodes, gamma, lam, kl_targ, batch_size, hid1_mult, pol
         observes, actions, advantages, disc_sum_rew = build_train_set(trajectories)
         # add various stats to training log:
         log_batch_stats(observes, actions, advantages, disc_sum_rew, logger, episode)
-        policy.update(observes, actions, advantages, logger)  # update policy
+        target_policy.update(observes, actions, advantages, logger)  # update policy
         val_func.fit(observes, disc_sum_rew, logger)  # update value function
         logger.write(display=True)  # write logger results to file and stdout
         if killer.kill_now:
@@ -327,7 +350,8 @@ def main(env_name, num_episodes, gamma, lam, kl_targ, batch_size, hid1_mult, pol
                 break
             killer.kill_now = False
     logger.close()
-    policy.close_sess()
+    explore_policy.close_sess()
+    target_policy.close_sess()
     val_func.close_sess()
 
 
