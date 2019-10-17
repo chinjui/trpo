@@ -37,9 +37,27 @@ import os
 import argparse
 import signal
 import tensorflow as tf
+import matplotlib as mpl
+mpl.use('Agg')
+import matplotlib.pyplot as plt
+import random
 import scipy
 from collections import deque
 from random import sample
+
+def set_global_seeds(seed):
+    """
+    set the seed for python random, tensorflow, numpy and gym spaces
+    :param seed: (int) the seed
+    """
+    tf.set_random_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    # prng was removed in latest gym version
+    if hasattr(gym.spaces, 'prng'):
+        gym.spaces.prng.seed(seed)
+
+rewards_record = []
 
 class GracefulKiller:
     """ Gracefully exit program on CTRL-C """
@@ -274,7 +292,7 @@ def log_batch_stats(observes, actions, advantages, disc_sum_rew, logger, episode
                 })
 
 
-def main(env_name, num_episodes, gamma, lam, kl_targ, batch_size, hid1_mult, policy_logvar):
+def main(env_name, num_episodes, gamma, lam, kl_targ, batch_size, hid1_mult, policy_logvar, **kwargs):
     """ Main training loop
 
     Args:
@@ -288,7 +306,7 @@ def main(env_name, num_episodes, gamma, lam, kl_targ, batch_size, hid1_mult, pol
         policy_logvar: natural log of initial policy variance
     """
     memory = deque([])
-    memory_size = 80
+    memory_size = kwargs['memory_size']
     killer = GracefulKiller()
     env, obs_dim, act_dim = init_gym(env_name)
     obs_dim += 1  # add 1 to obs dimension for time step feature (see run_episode())
@@ -305,6 +323,7 @@ def main(env_name, num_episodes, gamma, lam, kl_targ, batch_size, hid1_mult, pol
     run_policy(env, explore_policy, scaler, logger, episodes=5, fix_drct_dist=0)
     episode = 0
     fix_drct_dist_range = (0.3, 0)
+
     while episode < num_episodes:
         # save model
         if episode % 200 == 0:
@@ -349,6 +368,11 @@ def main(env_name, num_episodes, gamma, lam, kl_targ, batch_size, hid1_mult, pol
             if input('Terminate training (y/[n])? ') == 'y':
                 break
             killer.kill_now = False
+    with open('rewards_%s.txt' % kwargs['log_postfix'], 'w') as f:
+        for reward in rewards_record:
+          f.write('%f\n' % reward)
+    plt.plot((np.arange(len(rewards_record))+1) * batch_size, rewards_record)
+    plt.savefig('learning_curve_%s.png' % kwargs['log_postfix'])
     logger.close()
     explore_policy.close_sess()
     target_policy.close_sess()
@@ -369,6 +393,12 @@ if __name__ == "__main__":
     parser.add_argument('-b', '--batch_size', type=int,
                         help='Number of episodes per training batch',
                         default=20)
+    parser.add_argument('-o', '--memory_size', type=int,
+                        help='Size of replay buffer',
+                        default=80)
+    parser.add_argument('-s', '--seed', type=int,
+                        help='Number of episodes per training batch',
+                        default=0)
     parser.add_argument('-m', '--hid1_mult', type=int,
                         help='Size of first hidden layer for value and policy NNs'
                              '(integer multiplier of observation dimension)',
@@ -376,6 +406,6 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--policy_logvar', type=float,
                         help='Initial policy log-variance (natural log of variance)',
                         default=-1.0)
-
     args = parser.parse_args()
+    set_global_seeds(args.seed)
     main(**vars(args))
