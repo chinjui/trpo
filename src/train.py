@@ -70,7 +70,7 @@ def init_gym(env_name):
     return env, obs_dim, act_dim
 
 
-def run_episode(env, policy, scaler, animate=False, fix_drct_prob=0):
+def run_episode(env, policy, scaler, animate=False, fix_drct_dist=0):
     """ Run single episode with option to animate
 
     Args:
@@ -94,7 +94,6 @@ def run_episode(env, policy, scaler, animate=False, fix_drct_prob=0):
     scale[-1] = 1.0  # don't scale time step feature
     offset[-1] = 0.0  # don't offset time step feature
     action = None
-    prev_obs = None
     while not done:
         if animate:
             env.render()
@@ -103,15 +102,15 @@ def run_episode(env, policy, scaler, animate=False, fix_drct_prob=0):
         unscaled_obs.append(obs)
         obs = (obs - offset) * scale  # center and scale observations
         observes.append(obs)
-        if prev_obs is not None:
-          dist = scipy.spatial.distance.cosine(obs, prev_obs)
+        if len(observes) > 10:
+          center_of_mass_of_obs = np.array(observes[-11, -1]).mean(axis=0)  # calculate using the last 10 obs
+          dist = scipy.spatial.distance.cosine(obs, center_of_mass_of_obs)
         else:
           dist = None
-        if dist is not None and dist < fix_drct_prob:  # use previous action
-          pass  # No need to add?
+        if dist is not None and dist < fix_drct_dist and explore:  # use previous action
+          pass
         else:
           action = policy.sample(obs).reshape((1, -1)).astype(np.float32)
-        prev_obs = obs
         actions.append(action)
         obs, reward, done, _ = env.step(np.squeeze(action, axis=0))
         if not isinstance(reward, float):
@@ -123,7 +122,7 @@ def run_episode(env, policy, scaler, animate=False, fix_drct_prob=0):
             np.array(rewards, dtype=np.float64), np.concatenate(unscaled_obs))
 
 
-def run_policy(env, policy, scaler, logger, episodes, fix_drct_prob):
+def run_policy(env, policy, scaler, logger, episodes, fix_drct_dist):
     """ Run policy and collect data for a minimum of min_steps and min_episodes
 
     Args:
@@ -143,7 +142,7 @@ def run_policy(env, policy, scaler, logger, episodes, fix_drct_prob):
     total_steps = 0
     trajectories = []
     for e in range(episodes):
-        observes, actions, rewards, unscaled_obs = run_episode(env, policy, scaler, fix_drct_prob=fix_drct_prob)
+        observes, actions, rewards, unscaled_obs = run_episode(env, policy, scaler, fix_drct_dist=fix_drct_dist)
         total_steps += observes.shape[0]
         trajectory = {'observes': observes,
                       'actions': actions,
@@ -295,20 +294,24 @@ def main(env_name, num_episodes, gamma, lam, kl_targ, batch_size, hid1_mult, pol
     env = wrappers.Monitor(env, aigym_path, force=True)
     scaler = Scaler(obs_dim)
     val_func = NNValueFunction(obs_dim, hid1_mult)
-    policy = Policy(obs_dim, act_dim, kl_targ, hid1_mult, policy_logvar)
+    target_policy = Policy(obs_dim, act_dim, kl_targ, hid1_mult, policy_logvar)     # kl_targ = 0?
+    explore_policy = Policy(obs_dim, act_dim, kl_targ, hid1_mult, policy_logvar)
     # run a few episodes of untrained policy to initialize scaler:
-    run_policy(env, policy, scaler, logger, episodes=5, fix_drct_prob=0)
+    run_policy(env, target_policy, scaler, logger, episodes=5, fix_drct_dist=0)
+    run_policy(env, explore_policy, scaler, logger, episodes=5, fix_drct_dist=0)
     episode = 0
-    fix_drct_prob_range = (0.5, 0)
+    #
+    fix_drct_dist_range = (0.6, 0)
     while episode < num_episodes:
         # save model
         if episode % 200 == 0:
           save_path = policy.saver.save(policy.sess, "/home/csc63182/testspace/models/halfcheetah-trpo/model-%d.ckpt" % (episode))
-          print("Model saved in path: %s" % save_path)
 
-        fix_drct_prob = ((episode * fix_drct_prob_range[1]) + (num_episodes - episode) * fix_drct_prob_range[0]) / num_episodes
-        trajectories = run_policy(env, policy, scaler, logger, episodes=batch_size, fix_drct_prob=fix_drct_prob)
-        episode += len(trajectories)
+        fix_drct_dist = ((episode * fix_drct_dist_range[1]) + (num_episodes - episode) * fix_drct_dist_range[0]) / num_episoes
+        target_trajectories = run_policy(env, target_policy, scaler, logger, episodes=batch_size, fix_drct_dist=0)
+        explore_trajectories = run_policy(env, explore_policy, scaler, logger, episodes=batch_size, fix_drct_dist=fix_drct_dist)
+        trajectories = target_trajectories + explore_trajectories
+        episode += len(trajectories / 2)
         add_value(trajectories, val_func)  # add estimated values to episodes
         add_disc_sum_rew(trajectories, gamma)  # calculated discounted sum of Rs
         add_gae(trajectories, gamma, lam)  # calculate advantage
